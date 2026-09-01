@@ -2,10 +2,8 @@ name: Check Flights
 
 on:
   schedule:
-    # 08:00 BRT = 11:00 UTC
-    - cron: "0 11 * * *"
-    # 20:00 BRT = 23:00 UTC
-    - cron: "0 23 * * *"
+    # A cada 6 horas (UTC). Em BRT (UTC-3): 02:00, 08:00, 14:00, 20:00.
+    - cron: "0 */6 * * *"
   workflow_dispatch:
 
 jobs:
