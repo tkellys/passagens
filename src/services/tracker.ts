@@ -9,6 +9,21 @@ import { getAllActiveAlerts, UserAlert, deactivateAlert } from "./user";
 import { formatBRL, getUSDtoBRL } from "./currency";
 import { sendReply } from "./webhook";
 
+/**
+ * Retorna a primeira faixa (em ordem crescente) cujo valor máximo é >= o preço.
+ * Retorna null se o preço ultrapassar TODAS as faixas configuradas (não alerta).
+ */
+function getPriceTier(
+  price: number,
+  tiers: { threshold: number; label: string }[] | undefined
+): { threshold: number; label: string } | null {
+  if (!tiers) return null;
+  for (const tier of tiers) {
+    if (price <= tier.threshold) return tier;
+  }
+  return null;
+}
+
 export async function runTracker(): Promise<void> {
   console.log("[tracker] Iniciando rodada de verificação...");
   
@@ -150,7 +165,15 @@ async function processAlert(alert: UserAlert): Promise<void> {
     }))
   });
 
-  const isWithinUserThreshold = currentCheapest !== null && currentCheapest <= alert.max_price_brl;
+  const priceTier = currentCheapest !== null
+    ? getPriceTier(currentCheapest, config.search.priceTiers)
+    : null;
+
+  // Se PRICE_TIERS estiver configurado, ele manda: só alerta se o preço caiu em alguma faixa.
+  // Se não estiver configurado, mantém o comportamento antigo (MAX_PRICE_BRL do alerta).
+  const isWithinUserThreshold = (config.search.priceTiers?.length ?? 0) > 0
+    ? priceTier !== null
+    : (currentCheapest !== null && currentCheapest <= alert.max_price_brl);
   const isSignificantDrop = !lastPrice || (currentCheapest !== null && currentCheapest <= lastPrice * config.search.priceDropThreshold);
   const isNewPriceError = isPriceError && (!lastPrice || (currentCheapest !== null && currentCheapest < lastPrice));
 
@@ -170,7 +193,7 @@ async function processAlert(alert: UserAlert): Promise<void> {
       }
     }
 
-    await sendFlightAlert(bestFlight, isHistoricLow, alert.chat_id, isPriceError, priceErrorDetails);
+    await sendFlightAlert(bestFlight, isHistoricLow, alert.chat_id, isPriceError, priceErrorDetails, priceTier?.label);
   }
 }
 

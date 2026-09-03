@@ -82,6 +82,29 @@ export const config = {
       return undefined;
     })(),
     maxPriceBRL: Number(process.env.MAX_PRICE_BRL ?? "300"),
+    // Faixas de preço com selo próprio, ex:
+    //   PRICE_TIERS=500:🔥 IMPERDÍVEL,700:✅ BOM,800:🟡 ALTO MAS COMPENSA
+    // Cada faixa é "valor_máximo:selo". Precisam estar em ordem crescente de valor.
+    // Um preço só gera alerta se estiver dentro de alguma faixa (menor ou igual ao maior valor definido).
+    // Se PRICE_TIERS não for definido, o comportamento antigo (só MAX_PRICE_BRL) continua funcionando normalmente.
+    priceTiers: (() => {
+      const raw = process.env.PRICE_TIERS;
+      if (!raw) return [] as { threshold: number; label: string }[];
+
+      const tiers = raw.split(",").map((entry) => {
+        const [thresholdRaw, ...labelParts] = entry.split(":");
+        const threshold = Number((thresholdRaw ?? "").trim());
+        const label = labelParts.join(":").trim();
+        if (Number.isNaN(threshold) || !label) {
+          throw new Error(`PRICE_TIERS mal formatado perto de "${entry}". Use o formato "500:🔥 IMPERDÍVEL,700:✅ BOM".`);
+        }
+        return { threshold, label };
+      });
+
+      // Garante ordem crescente, mesmo se o .env vier fora de ordem.
+      tiers.sort((a, b) => a.threshold - b.threshold);
+      return tiers;
+    })(),
     priceDropThreshold: Number(process.env.PRICE_DROP_THRESHOLD ?? "0.95"),
     priceErrorThreshold: Number(process.env.PRICE_ERROR_THRESHOLD ?? "0.45"),
     historyRetentionDays: Number(process.env.HISTORY_RETENTION_DAYS ?? "365"),

@@ -29,11 +29,17 @@ export async function sendFlightAlert(
   isHistoricLow = false,
   targetChatId?: string | number,
   isPriceError = false,
-  priceErrorDetails?: { discountPct: number; averagePrice: number }
+  priceErrorDetails?: { discountPct: number; averagePrice: number },
+  tierLabel?: string
 ): Promise<void> {
   let emoji = isHistoricLow ? "🔥" : "✈️";
   let title = isHistoricLow ? "*Nível de preço histórico BAIXO!*" : "*Passagem barata encontrada!*";
-  
+
+  // Se a faixa de preço (PRICE_TIERS) tiver um selo próprio, ele substitui o título padrão.
+  if (tierLabel) {
+    title = `*${tierLabel}*`;
+  }
+
   if (isPriceError) {
     emoji = "🚨";
     title = "*URGENTE: POSSÍVEL ERRO DE TARIFA!*";
@@ -143,4 +149,3 @@ export async function sendPhoto(
     { timeout: TIMEOUT_MS }
   );
 }
-

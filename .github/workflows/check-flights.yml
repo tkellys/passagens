@@ -2,7 +2,7 @@ name: Check Flights
 
 on:
   schedule:
-    # A cada 6 horas (UTC). Em BRT (UTC-3): 02:00, 08:00, 14:00, 20:00.
+    # A cada 6 horas (UTC). Em BRT (UTC-3): 21:00, 03:00, 09:00, 15:00.
     - cron: "0 */6 * * *"
   workflow_dispatch:
 
@@ -48,4 +48,5 @@ jobs:
           DESTINATIONS: ${{ vars.DESTINATIONS }}
           DEPARTURE_DATE_OFFSET: ${{ vars.DEPARTURE_DATE_OFFSET }}
           MAX_PRICE_BRL: ${{ vars.MAX_PRICE_BRL }}
+          PRICE_TIERS: ${{ vars.PRICE_TIERS }}
         run: npx ts-node src/index.ts
