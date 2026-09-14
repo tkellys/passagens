@@ -177,6 +177,14 @@ async function processAlert(alert: UserAlert): Promise<void> {
   const isSignificantDrop = !lastPrice || (currentCheapest !== null && currentCheapest <= lastPrice * config.search.priceDropThreshold);
   const isNewPriceError = isPriceError && (!lastPrice || (currentCheapest !== null && currentCheapest < lastPrice));
 
+  console.log(
+    `[tracker] ${route}: menor preço R$ ${currentCheapest?.toFixed(2) ?? "N/A"} | ` +
+    `faixa: ${priceTier?.label ?? "fora de todas as faixas (PRICE_TIERS)"} | ` +
+    `preço anterior: ${lastPrice ? `R$ ${lastPrice.toFixed(2)}` : "sem registro anterior"} | ` +
+    `queda significativa: ${isSignificantDrop ? "sim" : "não"} | ` +
+    `vai alertar: ${(isWithinUserThreshold && isSignificantDrop) || isNewPriceError ? "SIM" : "não"}`
+  );
+
   if ((isWithinUserThreshold && isSignificantDrop) || isNewPriceError) {
     const bestFlight = flights.sort((a,b) => a.priceBRL - b.priceBRL)[0];
 
