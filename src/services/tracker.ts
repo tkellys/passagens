@@ -80,32 +80,105 @@ export async function runTracker(): Promise<void> {
   console.log("[tracker] Rodada de verificação finalizada.");
 }
 
+/** Soma N dias a uma data no formato "YYYY-MM-DD", devolvendo também "YYYY-MM-DD". */
+function addDays(dateStr: string, days: number): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d));
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().split("T")[0];
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+interface DateCheckResult {
+  date: string;
+  flights: Flight[];
+  currentCheapest: number | null;
+  priceTier: { threshold: number; label: string } | null;
+  isPriceError: boolean;
+  priceErrorDetails?: { discountPct: number; averagePrice: number };
+  willAlert: boolean;
+  isNewPriceError: boolean;
+}
+
 async function processAlert(alert: UserAlert): Promise<void> {
+  const route = `${alert.origin}→${alert.destination}`;
+
+  // Quantos dias consecutivos verificar a partir de alert.departure_date.
+  // DATE_RANGE_DAYS=1 (padrão) mantém o comportamento antigo: só a data exata.
+  const rangeDays = Math.max(1, config.search.dateRangeDays || 1);
+  const candidateDates = Array.from({ length: rangeDays }, (_, i) => addDays(alert.departure_date, i));
+
+  const results: DateCheckResult[] = [];
+
+  for (let i = 0; i < candidateDates.length; i++) {
+    const date = candidateDates[i];
+    console.log(`[tracker] Processando: ${route} em ${date} para Usuário ${alert.chat_id} (Limite: ${alert.max_price_brl})`);
+    const result = await checkOneDate(alert, date, route);
+    if (result) results.push(result);
+    if (i < candidateDates.length - 1) await sleep(3000); // boa prática: não bombardear a API
+  }
+
+  // Entre as datas que qualificam pra alerta, escolhe a melhor:
+  // 1º prioridade: erro de tarifa (urgente); 2º prioridade: menor preço.
+  const qualifying = results.filter(r => r.willAlert);
+  if (qualifying.length === 0) return;
+
+  const errorAlerts = qualifying.filter(r => r.isNewPriceError);
+  const pool = errorAlerts.length > 0 ? errorAlerts : qualifying;
+  const best = pool.reduce((min, r) =>
+    (r.currentCheapest ?? Infinity) < (min.currentCheapest ?? Infinity) ? r : min
+  );
+
+  if (candidateDates.length > 1) {
+    console.log(
+      `[tracker] ${route}: melhor data entre as verificadas foi ${best.date} ` +
+      `(R$ ${best.currentCheapest?.toFixed(2) ?? "N/A"}) — enviando alerta só dessa.`
+    );
+  }
+
+  const bestFlight = best.flights.sort((a, b) => a.priceBRL - b.priceBRL)[0];
+
+  // Detecta se o preço está em nível histórico baixo usando dados do Google Flights (Apify)
+  let isHistoricLow = false;
+  const insights = bestFlight.priceInsights;
+  if (insights) {
+    if (insights.priceLevel === "low") {
+      isHistoricLow = true;
+    } else if (insights.lowestPrice) {
+      const usdToBRL = await getUSDtoBRL();
+      isHistoricLow = bestFlight.priceBRL <= insights.lowestPrice * usdToBRL * 1.05;
+    }
+  }
+
+  await sendFlightAlert(bestFlight, isHistoricLow, alert.chat_id, best.isPriceError, best.priceErrorDetails, best.priceTier?.label);
+}
+
+/** Executa a busca, aplica filtros, salva histórico e decide se ESSA data específica qualifica pra alerta. */
+async function checkOneDate(alert: UserAlert, departureDate: string, route: string): Promise<DateCheckResult | null> {
   const params: SearchParams = {
     origin: alert.origin,
     destination: alert.destination,
-    departureDate: alert.departure_date,
+    departureDate,
     returnDate: alert.return_date,
     tripType: alert.trip_type as any
   };
-
-  const route = `${alert.origin}→${alert.destination}`;
-  console.log(`[tracker] Processando: ${route} para Usuário ${alert.chat_id} (Limite: ${alert.max_price_brl})`);
 
   let flights: Flight[] = [];
   try {
     flights = await fetchFlights(params);
   } catch (err) {
-    await sendErrorAlert(route, `Falha técnica ao buscar voos.`, alert.chat_id);
-    return;
+    await sendErrorAlert(route, `Falha técnica ao buscar voos (${departureDate}).`, alert.chat_id);
+    return null;
   }
 
-  // Aplica filtros e salva no histórico
   flights = applyAdvancedFilters(flights);
-  
+
   const currentCheapest = flights.length > 0 ? Math.min(...flights.map(f => f.priceBRL)) : null;
   const lastPrice = currentCheapest !== null
-    ? await getLastCheapestPrice(alert.origin, alert.destination, alert.departure_date)
+    ? await getLastCheapestPrice(alert.origin, alert.destination, departureDate)
     : null;
 
   // Detector de erro de tarifa (Price Glitch Detector)
@@ -113,17 +186,14 @@ async function processAlert(alert: UserAlert): Promise<void> {
   let priceErrorDetails: { discountPct: number; averagePrice: number } | undefined = undefined;
 
   if (currentCheapest !== null) {
-    // 1. Busca histórico filtrado por data de partida específica
-    let priceData = await getRoutePriceHistory(alert.origin, alert.destination, alert.departure_date);
+    let priceData = await getRoutePriceHistory(alert.origin, alert.destination, departureDate);
     let isSpecificDateUsed = true;
 
-    // 2. Se houver menos de 3 registros para aquela data, usa o histórico geral da rota
     if (priceData.length < 3) {
       priceData = await getRoutePriceHistory(alert.origin, alert.destination);
       isSpecificDateUsed = false;
     }
 
-    // 3. Se tiver amostragem suficiente (>= 3 registros)
     if (priceData.length >= 3) {
       const prices = priceData.map(([, price]) => price);
       const avgPrice = prices.reduce((sum, p) => sum + p, 0) / prices.length;
@@ -132,11 +202,8 @@ async function processAlert(alert: UserAlert): Promise<void> {
       if (currentCheapest <= thresholdPrice) {
         isPriceError = true;
         const discountPct = ((avgPrice - currentCheapest) / avgPrice) * 100;
-        priceErrorDetails = {
-          discountPct,
-          averagePrice: avgPrice
-        };
-        console.log(`[tracker] 🚨 POSSÍVEL ERRO DE TARIFA DETECTADO: ${route} em ${alert.departure_date}! Preço atual: ${currentCheapest} | Média (${isSpecificDateUsed ? "data" : "geral"}): ${avgPrice.toFixed(2)} | Queda: -${discountPct.toFixed(1)}%`);
+        priceErrorDetails = { discountPct, averagePrice: avgPrice };
+        console.log(`[tracker] 🚨 POSSÍVEL ERRO DE TARIFA DETECTADO: ${route} em ${departureDate}! Preço atual: ${currentCheapest} | Média (${isSpecificDateUsed ? "data" : "geral"}): ${avgPrice.toFixed(2)} | Queda: -${discountPct.toFixed(1)}%`);
       }
     }
   }
@@ -145,7 +212,7 @@ async function processAlert(alert: UserAlert): Promise<void> {
     timestamp: new Date().toISOString(),
     origin: alert.origin,
     destination: alert.destination,
-    departureDate: alert.departure_date,
+    departureDate,
     returnDate: alert.return_date,
     totalFound: flights.length,
     cheapestPriceBRL: currentCheapest,
@@ -169,40 +236,22 @@ async function processAlert(alert: UserAlert): Promise<void> {
     ? getPriceTier(currentCheapest, config.search.priceTiers)
     : null;
 
-  // Se PRICE_TIERS estiver configurado, ele manda: só alerta se o preço caiu em alguma faixa.
-  // Se não estiver configurado, mantém o comportamento antigo (MAX_PRICE_BRL do alerta).
   const isWithinUserThreshold = (config.search.priceTiers?.length ?? 0) > 0
     ? priceTier !== null
     : (currentCheapest !== null && currentCheapest <= alert.max_price_brl);
   const isSignificantDrop = !lastPrice || (currentCheapest !== null && currentCheapest <= lastPrice * config.search.priceDropThreshold);
   const isNewPriceError = isPriceError && (!lastPrice || (currentCheapest !== null && currentCheapest < lastPrice));
+  const willAlert = (isWithinUserThreshold && isSignificantDrop) || isNewPriceError;
 
   console.log(
-    `[tracker] ${route}: menor preço R$ ${currentCheapest?.toFixed(2) ?? "N/A"} | ` +
+    `[tracker] ${route} em ${departureDate}: menor preço R$ ${currentCheapest?.toFixed(2) ?? "N/A"} | ` +
     `faixa: ${priceTier?.label ?? "fora de todas as faixas (PRICE_TIERS)"} | ` +
     `preço anterior: ${lastPrice ? `R$ ${lastPrice.toFixed(2)}` : "sem registro anterior"} | ` +
     `queda significativa: ${isSignificantDrop ? "sim" : "não"} | ` +
-    `vai alertar: ${(isWithinUserThreshold && isSignificantDrop) || isNewPriceError ? "SIM" : "não"}`
+    `vai alertar: ${willAlert ? "SIM" : "não"}`
   );
 
-  if ((isWithinUserThreshold && isSignificantDrop) || isNewPriceError) {
-    const bestFlight = flights.sort((a,b) => a.priceBRL - b.priceBRL)[0];
-
-    // Detecta se o preço está em nível histórico baixo usando dados do Google Flights (Apify)
-    let isHistoricLow = false;
-    const insights = bestFlight.priceInsights;
-    if (insights) {
-      if (insights.priceLevel === "low") {
-        isHistoricLow = true;
-      } else if (insights.lowestPrice) {
-        // Compara com o menor preço histórico (convertido para BRL com margem de 5%)
-        const usdToBRL = await getUSDtoBRL();
-        isHistoricLow = bestFlight.priceBRL <= insights.lowestPrice * usdToBRL * 1.05;
-      }
-    }
-
-    await sendFlightAlert(bestFlight, isHistoricLow, alert.chat_id, isPriceError, priceErrorDetails, priceTier?.label);
-  }
+  return { date: departureDate, flights, currentCheapest, priceTier, isPriceError, priceErrorDetails, willAlert, isNewPriceError };
 }
 
 async function fetchFlights(params: SearchParams): Promise<Flight[]> {
