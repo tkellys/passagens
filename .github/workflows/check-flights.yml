@@ -49,6 +49,7 @@ jobs:
           DEPARTURE_DATE_OFFSET: ${{ vars.DEPARTURE_DATE_OFFSET }}
           DEPARTURE_DATE: ${{ vars.DEPARTURE_DATE }}
           RETURN_DATE: ${{ vars.RETURN_DATE }}
+          DATE_RANGE_DAYS: ${{ vars.DATE_RANGE_DAYS }}
           MAX_PRICE_BRL: ${{ vars.MAX_PRICE_BRL }}
           PRICE_TIERS: ${{ vars.PRICE_TIERS }}
         run: npx ts-node src/index.ts
