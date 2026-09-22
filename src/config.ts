@@ -62,6 +62,9 @@ export const config = {
       return date.toISOString().split("T")[0];
     })(),
     dateRangeDays: Number(process.env.DATE_RANGE_DAYS ?? "1"),
+    // Mesma ideia do dateRangeDays, só que pra data de VOLTA (round-trip).
+    // RETURN_DATE_RANGE_DAYS=2 com RETURN_DATE=2027-01-02 testa 02/01 E 03/01.
+    returnDateRangeDays: Number(process.env.RETURN_DATE_RANGE_DAYS ?? "1"),
     adults: Number(process.env.ADULTS ?? "1"),
     children: Number(process.env.CHILDREN ?? "0"),
     tripType: (() => {
