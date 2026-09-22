@@ -24,6 +24,18 @@ function getPriceTier(
   return null;
 }
 
+/** Soma N dias a uma data no formato "YYYY-MM-DD", devolvendo também "YYYY-MM-DD". */
+function addDays(dateStr: string, days: number): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d));
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().split("T")[0];
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function runTracker(): Promise<void> {
   console.log("[tracker] Iniciando rodada de verificação...");
   
@@ -80,20 +92,9 @@ export async function runTracker(): Promise<void> {
   console.log("[tracker] Rodada de verificação finalizada.");
 }
 
-/** Soma N dias a uma data no formato "YYYY-MM-DD", devolvendo também "YYYY-MM-DD". */
-function addDays(dateStr: string, days: number): string {
-  const [y, m, d] = dateStr.split("-").map(Number);
-  const date = new Date(Date.UTC(y, m - 1, d));
-  date.setUTCDate(date.getUTCDate() + days);
-  return date.toISOString().split("T")[0];
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 interface DateCheckResult {
-  date: string;
+  departureDate: string;
+  returnDate?: string;
   flights: Flight[];
   currentCheapest: number | null;
   priceTier: { threshold: number; label: string } | null;
@@ -106,22 +107,33 @@ interface DateCheckResult {
 async function processAlert(alert: UserAlert): Promise<void> {
   const route = `${alert.origin}→${alert.destination}`;
 
-  // Quantos dias consecutivos verificar a partir de alert.departure_date.
-  // DATE_RANGE_DAYS=1 (padrão) mantém o comportamento antigo: só a data exata.
-  const rangeDays = Math.max(1, config.search.dateRangeDays || 1);
-  const candidateDates = Array.from({ length: rangeDays }, (_, i) => addDays(alert.departure_date, i));
+  // Quantos dias consecutivos verificar a partir de alert.departure_date (ida).
+  const departureRangeDays = Math.max(1, config.search.dateRangeDays || 1);
+  const candidateDepartureDates = Array.from({ length: departureRangeDays }, (_, i) => addDays(alert.departure_date, i));
+
+  // O mesmo, mas pra data de volta — só se for round-trip (alert.return_date existir).
+  const returnRangeDays = Math.max(1, config.search.returnDateRangeDays || 1);
+  const candidateReturnDates: (string | undefined)[] = alert.return_date
+    ? Array.from({ length: returnRangeDays }, (_, i) => addDays(alert.return_date!, i))
+    : [undefined];
 
   const results: DateCheckResult[] = [];
+  let isFirstCombo = true;
 
-  for (let i = 0; i < candidateDates.length; i++) {
-    const date = candidateDates[i];
-    console.log(`[tracker] Processando: ${route} em ${date} para Usuário ${alert.chat_id} (Limite: ${alert.max_price_brl})`);
-    const result = await checkOneDate(alert, date, route);
-    if (result) results.push(result);
-    if (i < candidateDates.length - 1) await sleep(3000); // boa prática: não bombardear a API
+  for (const departureDate of candidateDepartureDates) {
+    for (const returnDate of candidateReturnDates) {
+      if (!isFirstCombo) await sleep(3000); // boa prática: não bombardear a API
+      isFirstCombo = false;
+
+      const dateLabel = returnDate ? `${departureDate} → ${returnDate}` : departureDate;
+      console.log(`[tracker] Processando: ${route} em ${dateLabel} para Usuário ${alert.chat_id} (Limite: ${alert.max_price_brl})`);
+
+      const result = await checkOneDate(alert, departureDate, returnDate, route);
+      if (result) results.push(result);
+    }
   }
 
-  // Entre as datas que qualificam pra alerta, escolhe a melhor:
+  // Entre as combinações que qualificam pra alerta, escolhe a melhor:
   // 1º prioridade: erro de tarifa (urgente); 2º prioridade: menor preço.
   const qualifying = results.filter(r => r.willAlert);
   if (qualifying.length === 0) return;
@@ -132,9 +144,10 @@ async function processAlert(alert: UserAlert): Promise<void> {
     (r.currentCheapest ?? Infinity) < (min.currentCheapest ?? Infinity) ? r : min
   );
 
-  if (candidateDates.length > 1) {
+  if (results.length > 1) {
+    const bestLabel = best.returnDate ? `${best.departureDate} → ${best.returnDate}` : best.departureDate;
     console.log(
-      `[tracker] ${route}: melhor data entre as verificadas foi ${best.date} ` +
+      `[tracker] ${route}: melhor combinação entre as verificadas foi ${bestLabel} ` +
       `(R$ ${best.currentCheapest?.toFixed(2) ?? "N/A"}) — enviando alerta só dessa.`
     );
   }
@@ -156,13 +169,13 @@ async function processAlert(alert: UserAlert): Promise<void> {
   await sendFlightAlert(bestFlight, isHistoricLow, alert.chat_id, best.isPriceError, best.priceErrorDetails, best.priceTier?.label);
 }
 
-/** Executa a busca, aplica filtros, salva histórico e decide se ESSA data específica qualifica pra alerta. */
-async function checkOneDate(alert: UserAlert, departureDate: string, route: string): Promise<DateCheckResult | null> {
+/** Executa a busca, aplica filtros, salva histórico e decide se ESSA combinação de datas qualifica pra alerta. */
+async function checkOneDate(alert: UserAlert, departureDate: string, returnDate: string | undefined, route: string): Promise<DateCheckResult | null> {
   const params: SearchParams = {
     origin: alert.origin,
     destination: alert.destination,
     departureDate,
-    returnDate: alert.return_date,
+    returnDate,
     tripType: alert.trip_type as any
   };
 
@@ -213,7 +226,7 @@ async function checkOneDate(alert: UserAlert, departureDate: string, route: stri
     origin: alert.origin,
     destination: alert.destination,
     departureDate,
-    returnDate: alert.return_date,
+    returnDate,
     totalFound: flights.length,
     cheapestPriceBRL: currentCheapest,
     flights: flights.map(f => ({
@@ -243,15 +256,16 @@ async function checkOneDate(alert: UserAlert, departureDate: string, route: stri
   const isNewPriceError = isPriceError && (!lastPrice || (currentCheapest !== null && currentCheapest < lastPrice));
   const willAlert = (isWithinUserThreshold && isSignificantDrop) || isNewPriceError;
 
+  const dateLabel = returnDate ? `${departureDate} → ${returnDate}` : departureDate;
   console.log(
-    `[tracker] ${route} em ${departureDate}: menor preço R$ ${currentCheapest?.toFixed(2) ?? "N/A"} | ` +
+    `[tracker] ${route} em ${dateLabel}: menor preço R$ ${currentCheapest?.toFixed(2) ?? "N/A"} | ` +
     `faixa: ${priceTier?.label ?? "fora de todas as faixas (PRICE_TIERS)"} | ` +
     `preço anterior: ${lastPrice ? `R$ ${lastPrice.toFixed(2)}` : "sem registro anterior"} | ` +
     `queda significativa: ${isSignificantDrop ? "sim" : "não"} | ` +
     `vai alertar: ${willAlert ? "SIM" : "não"}`
   );
 
-  return { date: departureDate, flights, currentCheapest, priceTier, isPriceError, priceErrorDetails, willAlert, isNewPriceError };
+  return { departureDate, returnDate, flights, currentCheapest, priceTier, isPriceError, priceErrorDetails, willAlert, isNewPriceError };
 }
 
 async function fetchFlights(params: SearchParams): Promise<Flight[]> {
